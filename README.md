@@ -57,6 +57,7 @@ npm run dev
 | 异常重跑 | `rerun` | 重跑任务 | 任务编号、原始运行编号、重跑区间开始 |
 | 基线管理 | `baseline` | 基线定义 | 基线编号、基线名称、承诺完成时间 |
 | 分区检测 | `partitioncheck` | 检测规则 | 规则编号、数据表名、期望分区数 |
+| 分区补齐 | `partitionbackfill` | 检测批次/补齐任务/处理记录/重跑清单 | 检测批次号、补齐任务编号、分区标识、优先级、完整性结论 |
 | 数据比对 | `comparator` | 比对任务 | 任务编号、源表名、目标表名 |
 | 元数据存储 | `metastore` | 元数据表 | 表编号、表名、所属数仓层 |
 | 资源配置 | `resource` | 资源池 | 池编号、池名称、最大并发数 |
@@ -73,6 +74,27 @@ npm run dev
   `backend/app/routers/<模块>.py`，业务规则在 `backend/app/services/<模块>.py`。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 分区补齐受控交接
+
+分区检测只负责产出缺失分区清单，补齐执行由 `partitionbackfill` 模块承接：
+
+- **检测批次与快照**：每次检测生成带校验和的缺失分区清单快照；交接前重算校验和，
+  快照被篡改直接拒绝（`POST /api/partitionbackfill/detections`、`.../detections/{id}/handoff`）。
+- **一份任务**：同一数据表分区在未补齐期间只存在一份补齐任务，重复检测复用并挂接新批次；
+  补齐后再次缺失则重开原任务，不产生第二份。
+- **冲突仲裁**：自动补齐与人工处理结果都留痕；人工优先，同来源较晚到达的记录覆盖较早记录，
+  被采纳的记录决定分区完整性结论（`POST .../tasks/{id}/results`，处理记录见 `.../results`）。
+- **原子提交**：补齐完成与完整性结论在同一事务内提交，中途异常整体回滚
+  （`services/partitionbackfill.transaction`）。
+- **状态分列**：补齐任务状态（待交接/待补齐/补齐中/已补齐/补齐失败）与运行实例分区状态
+  （未下发/运行实例处理中/已完成/失败）分字段存储，互不覆盖。
+- **任务文件**：补齐任务可下载 CSV（含分区标识与优先级），重新下载与查询结果保持完整一致
+  （`GET .../tasks/{id}/download`、`.../tasks-file/bundle`）。
+- **异常重跑对接**：重跑读取补齐任务数据快照且只消费仍未补齐的分区，已补齐分区自动跳过；
+  业务结果落到重跑清单并随分区检测重算，成功分区原子提交完整性结论
+  （`/api/rerun/partition-snapshot/consume`、`.../partition-rerun/items/{编号}/results`）。
+- 端到端场景校验：`cd backend && .venv/bin/python scenario_check.py`。
 
 领域：数据工程
 子方向：数仓与数据湖
